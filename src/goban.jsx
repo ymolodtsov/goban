@@ -1,4 +1,76 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+
+// --- SOUND ENGINE (Web Audio API, no external files) ---
+const audioCtx = typeof AudioContext !== "undefined" ? new AudioContext() : null;
+
+function playTone(freq, duration, type = "sine", volume = 0.15, decay = true) {
+  if (!audioCtx) return;
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  gain.gain.value = volume;
+  if (decay) gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start(audioCtx.currentTime);
+  osc.stop(audioCtx.currentTime + duration);
+}
+
+function playNoise(duration, volume = 0.08) {
+  if (!audioCtx) return;
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * duration, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (data.length * 0.15));
+  const src = audioCtx.createBufferSource();
+  const gain = audioCtx.createGain();
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = "bandpass";
+  filter.frequency.value = 800;
+  filter.Q.value = 1.5;
+  src.buffer = buf;
+  gain.gain.value = volume;
+  src.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioCtx.destination);
+  src.start();
+}
+
+const Sounds = {
+  stonePlace() {
+    // Short woody "chpok" — bandpassed noise burst + low thud
+    playNoise(0.08, 0.18);
+    playTone(160, 0.1, "sine", 0.12);
+  },
+  shapeComplete() {
+    // Quick ascending chime
+    [523, 659, 784].forEach((f, i) => setTimeout(() => playTone(f, 0.25, "triangle", 0.12), i * 70));
+  },
+  win() {
+    // Triumphant ascending chord
+    [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => playTone(f, 0.6, "triangle", 0.10), i * 100));
+  },
+  lose() {
+    // Descending tones
+    [392, 330, 262].forEach((f, i) => setTimeout(() => playTone(f, 0.45, "sine", 0.10), i * 140));
+  },
+};
+
+function useLayout() {
+  const [width, setWidth] = useState(window.innerWidth);
+  useEffect(() => {
+    const onResize = () => setWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const mobile = width < 480;
+  // On mobile, board fills entire width. On desktop, cap at 40px cells.
+  const maxBoardW = mobile ? width : width - 32;
+  const cellSize = Math.min(40, Math.floor(maxBoardW / 10));
+  return { mobile, cellSize };
+}
 
 // --- TETROMINO DEFINITIONS ---
 const SHAPE_DEFS = {
@@ -78,50 +150,103 @@ function canShapeFit(board, player, shape) {
       }
   return false;
 }
-function canAnyShapeFit(board, player) { return ALL_SHAPES.some((s) => canShapeFit(board, player, s)); }
-function pickFeasibleShape(board, player) {
-  const f = ALL_SHAPES.filter((s) => canShapeFit(board, player, s));
-  return f.length === 0 ? null : f[Math.floor(Math.random() * f.length)];
-}
 
 // --- AI ---
+const AI_TEMPERATURE = 1.2;
+
+function findPlacements(board, player, shape) {
+  const locked = player === BLACK ? LOCKED_BLACK : LOCKED_WHITE;
+  const results = [];
+  for (const rot of shape.rotations) {
+    for (let bR = 0; bR <= BOARD_SIZE - 1; bR++) {
+      for (let bC = 0; bC <= BOARD_SIZE - 1; bC++) {
+        const cells = rot.map(([dr, dc]) => [bR + dr, bC + dc]);
+        if (!cells.every(([r, c]) => r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE))
+          continue;
+        let filled = 0, blocked = false;
+        const emptyCells = [];
+        for (const [r, c] of cells) {
+          const v = board[r][c];
+          if (v === player || v === locked) filled++;
+          else if (v === EMPTY) emptyCells.push([r, c]);
+          else { blocked = true; break; }
+        }
+        if (!blocked) results.push({ cells, filled, emptyCells, total: shape.size });
+      }
+    }
+  }
+  return results;
+}
+
+function potentialMap(board, player, shape) {
+  const scores = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(0));
+  const placements = findPlacements(board, player, shape);
+  for (const p of placements) {
+    // (0.2 + filled)² gives non-zero weight even with 0 stones placed,
+    // so the AI picks strategically when starting a new shape.
+    const weight = (0.2 + p.filled) * (0.2 + p.filled);
+    for (const [r, c] of p.emptyCells) scores[r][c] += weight;
+  }
+  return scores;
+}
+
+function softmaxSample(items, temperature) {
+  if (items.length === 0) return null;
+  const maxS = Math.max(...items.map((x) => x.score));
+  const exps = items.map((x) => Math.exp((x.score - maxS) / temperature));
+  const sum = exps.reduce((a, b) => a + b, 0);
+  let rand = Math.random() * sum;
+  for (let i = 0; i < items.length; i++) {
+    rand -= exps[i];
+    if (rand <= 0) return items[i];
+  }
+  return items[items.length - 1];
+}
+
 function aiMove(board, aiShape, playerShape) {
   const empty = [];
   for (let r = 0; r < BOARD_SIZE; r++)
     for (let c = 0; c < BOARD_SIZE; c++)
       if (board[r][c] === EMPTY) empty.push([r, c]);
   if (!empty.length) return null;
-  for (const [r, c] of empty) { const b = board.map((row) => [...row]); b[r][c] = WHITE; if (findCompletedShape(b, WHITE, aiShape)) return [r, c]; }
-  for (const [r, c] of empty) { const b = board.map((row) => [...row]); b[r][c] = BLACK; if (findCompletedShape(b, BLACK, playerShape)) return [r, c]; }
-  const whites = [];
-  for (let r = 0; r < BOARD_SIZE; r++) for (let c = 0; c < BOARD_SIZE; c++) if (board[r][c] === WHITE) whites.push([r, c]);
-  if (whites.length > 0) {
-    let best = null, bestS = -1;
-    for (const [r, c] of empty) {
-      let s = 0;
-      for (const [wr, wc] of whites) { const d = Math.abs(r - wr) + Math.abs(c - wc); if (d <= 2) s += 3 - d; }
-      s += Math.random() * 0.5;
-      if (s > bestS) { bestS = s; best = [r, c]; }
-    }
-    if (best) return best;
+
+  for (const [r, c] of empty) {
+    const b = board.map((row) => [...row]);
+    b[r][c] = WHITE;
+    if (findCompletedShape(b, WHITE, aiShape)) return [r, c];
   }
-  const ctr = Math.floor(BOARD_SIZE / 2);
-  empty.sort((a, b) => (Math.abs(a[0]-ctr)+Math.abs(a[1]-ctr)) - (Math.abs(b[0]-ctr)+Math.abs(b[1]-ctr)) + (Math.random()-0.5)*3);
-  return empty[0];
+
+  for (const [r, c] of empty) {
+    const b = board.map((row) => [...row]);
+    b[r][c] = BLACK;
+    if (findCompletedShape(b, BLACK, playerShape)) return [r, c];
+  }
+
+  const offenseMap = potentialMap(board, WHITE, aiShape);
+  const defenseMap = potentialMap(board, BLACK, playerShape);
+
+  const scored = empty.map(([r, c]) => {
+    const offense = offenseMap[r][c];
+    const defense = defenseMap[r][c];
+    const ctr = (BOARD_SIZE - 1) / 2;
+    const centerBonus = (1 - (Math.abs(r - ctr) + Math.abs(c - ctr)) / BOARD_SIZE) * 0.3;
+    return { move: [r, c], score: offense * 1.1 + defense * 0.9 + centerBonus };
+  });
+
+  const pick = softmaxSample(scored, AI_TEMPERATURE);
+  return pick ? pick.move : empty[0];
 }
 
 // --- STONE SVG COMPONENT (realistic) ---
-function Stone({ cx, cy, radius, isBlack, isLocked, isFlash, isLast }) {
-  const id = `s${Math.round(cx)}-${Math.round(cy)}`;
-  const isActive = !isLocked;
+function Stone({ cx, cy, radius, isBlack, isLocked, isFlash, isLast, gameOver }) {
+  const id = `s${isBlack ? "b" : "w"}-${Math.round(cx)}-${Math.round(cy)}`;
+  const showLocked = isLocked && !gameOver;
   return (
-    <g style={{ animation: isFlash ? "flashPulse 0.7s ease" : isLast ? "stonePop 0.3s cubic-bezier(0.34,1.56,0.64,1)" : "none" }}>
-      {/* Active stone — bright golden ring */}
-      {isActive && (
-        <circle cx={cx} cy={cy} r={radius + 3.5}
-          fill="none" stroke="rgba(230,190,60,0.85)" strokeWidth={2.5}
-          style={{ animation: "activeGlow 2s ease-in-out infinite" }} />
-      )}
+    <g style={{
+      animation: isFlash ? "flashPulse 0.7s ease" : isLast ? "stonePop 0.3s cubic-bezier(0.34,1.56,0.64,1)" : "none",
+      opacity: showLocked ? 0.55 : 1,
+      transition: "opacity 0.4s",
+    }}>
       {/* Soft shadow */}
       <ellipse cx={cx + 1} cy={cy + 2.5} rx={radius * 0.92} ry={radius * 0.7} fill="rgba(0,0,0,0.18)" />
       {/* Stone body */}
@@ -149,34 +274,53 @@ function Stone({ cx, cy, radius, isBlack, isLocked, isFlash, isLast }) {
 }
 
 // --- SHAPE PREVIEW ---
-function ShapePreview({ shape, label, score, isActive, stoneType }) {
-  if (!shape) return <div style={{ width: 140, textAlign: "center" }}><span style={{ fontSize: 14, color: "#6b5e4e", fontFamily: "var(--font)" }}>No shapes left</span></div>;
+function ShapePreview({ shape, label, score, isActive, stoneType, compact, blocked }) {
+  if (!shape) return <div style={{ width: compact ? 100 : 140, textAlign: "center" }}><span style={{ fontSize: compact ? 12 : 14, color: "#6b5e4e", fontFamily: "var(--font)" }}>No shapes left</span></div>;
   const cells = shape.cells;
   const maxR = Math.max(...cells.map((c) => c[0])) + 1;
   const maxC = Math.max(...cells.map((c) => c[1])) + 1;
-  const sz = 20, pad = 6;
-  const w = maxC * sz + pad * 2, h = maxR * sz + pad * 2;
+  const sz = compact ? 15 : 20, pad = compact ? 4 : 6;
+  const maxRows = 4; // tallest shape (I-piece vertical)
+  const maxCols = 4; // widest shape (I-piece horizontal)
+  const fixedW = maxCols * sz + pad * 2;
+  const fixedH = maxRows * sz + pad * 2;
+  // Center the shape within the fixed-size SVG
+  const offsetX = (fixedW - (maxC * sz)) / 2;
+  const offsetY = (fixedH - (maxR * sz)) / 2;
   return (
     <div style={{
-      display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+      display: "flex", flexDirection: "column", alignItems: "center", gap: compact ? 3 : 6,
       transition: "all 0.4s cubic-bezier(0.4,0,0.2,1)",
-      transform: isActive ? "scale(1)" : "scale(0.92)", opacity: isActive ? 1 : 0.45,
+      transform: "scale(1)",
     }}>
-      <span style={{ fontFamily: "var(--font)", fontSize: 13, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "#5a4e3e" }}>{label}</span>
+      <span style={{ fontFamily: "var(--font)", fontSize: compact ? 10 : 13, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "#5a4e3e" }}>{label}</span>
       <div style={{
-        background: isActive ? "rgba(207,164,70,0.12)" : "rgba(207,164,70,0.04)",
-        borderRadius: 10, padding: "12px 16px",
-        border: isActive ? "2px solid rgba(207,164,70,0.5)" : "2px solid rgba(207,164,70,0.1)",
+        position: "relative",
+        background: blocked ? "rgba(120,110,100,0.08)" : isActive ? "rgba(207,164,70,0.18)" : "rgba(207,164,70,0.10)",
+        borderRadius: compact ? 8 : 10, padding: compact ? "6px 10px" : "12px 16px",
+        border: blocked ? "2px solid rgba(120,110,100,0.15)" : isActive ? "2px solid rgba(207,164,70,0.5)" : "2px solid rgba(207,164,70,0.2)",
         transition: "all 0.4s cubic-bezier(0.4,0,0.2,1)",
       }}>
-        <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+        <svg width={fixedW} height={fixedH} viewBox={`0 0 ${fixedW} ${fixedH}`}
+          style={{ opacity: blocked ? 0.3 : 1, transition: "opacity 0.4s" }}>
           {cells.map(([r, c], i) => {
-            const cx = pad + c * sz + sz / 2, cy = pad + r * sz + sz / 2, rad = sz / 2 - 2;
+            const cx = offsetX + c * sz + sz / 2, cy = offsetY + r * sz + sz / 2, rad = sz / 2 - 2;
             return <Stone key={i} cx={cx} cy={cy} radius={rad} isBlack={stoneType === "black"} isLocked={true} isFlash={false} isLast={false} />;
           })}
         </svg>
+        {blocked && (
+          <div style={{
+            position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            <span style={{
+              fontFamily: "var(--font)", fontSize: compact ? 11 : 13, fontWeight: 700,
+              textTransform: "uppercase", letterSpacing: "0.1em",
+              color: "#8a7e6e",
+            }}>Blocked</span>
+          </div>
+        )}
       </div>
-      <span style={{ fontFamily: "var(--font)", fontSize: 15, fontWeight: 700, color: "#2a2318" }}>
+      <span style={{ fontFamily: "var(--font)", fontSize: compact ? 12 : 15, fontWeight: 700, color: blocked ? "#8a7e6e" : "#2a2318", transition: "color 0.4s" }}>
         {shape.name}-piece · {shape.size}pts
       </span>
     </div>
@@ -184,13 +328,13 @@ function ShapePreview({ shape, label, score, isActive, stoneType }) {
 }
 
 // --- SCORE BAR ---
-function ScoreBar({ score, maxScore, isBlack, label }) {
+function ScoreBar({ score, maxScore, isBlack, label, compact }) {
   const pct = Math.min((score / maxScore) * 100, 100);
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5, minWidth: 120 }}>
-      <span style={{ fontFamily: "var(--font)", fontSize: 13, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "#5a4e3e" }}>{label}</span>
-      <div style={{ fontSize: 38, fontWeight: 700, fontFamily: "var(--font-display)", color: "#2a2318", lineHeight: 1 }}>{score}</div>
-      <div style={{ width: 90, height: 5, borderRadius: 3, background: "rgba(61,53,41,0.12)", overflow: "hidden" }}>
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: compact ? 2 : 5, minWidth: compact ? 80 : 120 }}>
+      <span style={{ fontFamily: "var(--font)", fontSize: compact ? 10 : 13, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "#5a4e3e" }}>{label}</span>
+      <div style={{ fontSize: compact ? 28 : 38, fontWeight: 700, fontFamily: "var(--font-display)", color: "#2a2318", lineHeight: 1 }}>{score}</div>
+      <div style={{ width: compact ? 60 : 90, height: compact ? 4 : 5, borderRadius: 3, background: "rgba(61,53,41,0.12)", overflow: "hidden" }}>
         <div style={{
           height: "100%", borderRadius: 3, transition: "width 0.6s cubic-bezier(0.4,0,0.2,1)",
           width: `${pct}%`,
@@ -218,83 +362,119 @@ export default function GobanGame() {
   const [moveCount, setMoveCount] = useState(0);
   const [aiThinking, setAiThinking] = useState(false);
   const [scorePop, setScorePop] = useState(null); // {x, y, pts, key}
+  const [splash, setSplash] = useState(null); // {cells: [[r,c],...], key, isBlack}
+  const [hideOverlay, setHideOverlay] = useState(false);
+  const [muted, setMuted] = useState(false);
   const popKeyRef = useRef(0);
+  const mutedRef = useRef(false);
+  mutedRef.current = muted;
+  const snd = useCallback((fn) => { if (!mutedRef.current) fn(); }, []);
+
+  // Resolve completed shapes for a player, including chain completions.
+  // Mutates board/locked in place, returns { score, shape, flash, splashCells }.
+  // After completion, assigns a new random shape (no feasibility filter — blocked shapes stay).
+  const resolveCompletions = useCallback((board, player, shape, locked) => {
+    let totalScore = 0;
+    let currentShape = shape;
+    const allFlash = new Set();
+    let lastSplash = null;
+    const isBlack = player === BLACK;
+    const lockedType = isBlack ? LOCKED_BLACK : LOCKED_WHITE;
+
+    while (currentShape) {
+      const match = findCompletedShape(board, player, currentShape);
+      if (!match) break;
+      totalScore += currentShape.size;
+      match.forEach(([mr, mc]) => { board[mr][mc] = lockedType; locked.add(`${mr},${mc}`); allFlash.add(`${mr},${mc}`); });
+      popKeyRef.current++;
+      lastSplash = { cells: match, key: popKeyRef.current, isBlack };
+      // Assign a new random shape — it may or may not be feasible, that's fine
+      currentShape = randomShape();
+    }
+    return { score: totalScore, shape: currentShape, flash: allFlash, splashCells: lastSplash };
+  }, []);
 
   const handleCellClick = useCallback((r, c) => {
     if (gameOver || turn !== BLACK || board[r][c] !== EMPTY) return;
+    snd(Sounds.stonePlace);
     const newBoard = board.map((row) => [...row]);
     newBoard[r][c] = BLACK;
     setLastPlaced(`${r},${c}`);
     setMoveCount((m) => m + 1);
 
-    const match = findCompletedShape(newBoard, BLACK, playerShape);
-    let newPlayerScore = playerScore;
-    let newLocked = new Set(lockedCells);
-    let newFlash = new Set();
-    if (match) {
-      newPlayerScore = playerScore + playerShape.size;
-      match.forEach(([mr, mc]) => { newBoard[mr][mc] = LOCKED_BLACK; newLocked.add(`${mr},${mc}`); newFlash.add(`${mr},${mc}`); });
+    const blocked = !canShapeFit(board, BLACK, playerShape);
+    const newLocked = new Set(lockedCells);
+    const result = blocked
+      ? { score: 0, shape: playerShape, flash: new Set(), splashCells: null }
+      : resolveCompletions(newBoard, BLACK, playerShape, newLocked);
+    const newPlayerScore = playerScore + result.score;
+
+    if (result.score > 0) {
       popKeyRef.current++;
-      setScorePop({ x: r, y: c, pts: playerShape.size, key: popKeyRef.current, player: "black" });
+      setScorePop({ x: r, y: c, pts: result.score, key: popKeyRef.current, player: "black" });
+      setSplash(result.splashCells);
       setTimeout(() => setScorePop(null), 1200);
+      setTimeout(() => setSplash(null), 1000);
+      snd(Sounds.shapeComplete);
     }
     setBoard(newBoard);
     setPlayerScore(newPlayerScore);
     setLockedCells(newLocked);
-    setFlashCells(newFlash);
+    setFlashCells(result.flash);
+    if (result.shape !== playerShape) setPlayerShape(result.shape);
 
-    if (newPlayerScore >= WIN_SCORE) { setGameOver("player"); return; }
-    let nextPlayerShape = match ? null : playerShape;
-    if (match || !canShapeFit(newBoard, BLACK, playerShape)) { nextPlayerShape = pickFeasibleShape(newBoard, BLACK); setPlayerShape(nextPlayerShape); }
-    if (newFlash.size > 0) setTimeout(() => setFlashCells(new Set()), 700);
+    if (newPlayerScore >= WIN_SCORE) { snd(Sounds.win); setGameOver("player"); return; }
+    if (result.flash.size > 0) setTimeout(() => setFlashCells(new Set()), 700);
     const hasEmpty = newBoard.some((row) => row.some((cell) => cell === EMPTY));
-    if (!hasEmpty) { setGameOver(newPlayerScore > aiScore ? "player" : aiScore > newPlayerScore ? "ai" : "draw"); return; }
-    if (!nextPlayerShape && !canAnyShapeFit(newBoard, WHITE)) { setGameOver(newPlayerScore > aiScore ? "player" : aiScore > newPlayerScore ? "ai" : "draw"); return; }
+    if (!hasEmpty) { const w = newPlayerScore > aiScore ? "player" : aiScore > newPlayerScore ? "ai" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setGameOver(w); return; }
+    // Both shapes blocked — no more points possible, end the game
+    const playerNowBlocked = !canShapeFit(newBoard, BLACK, result.shape);
+    const aiNowBlocked = !canShapeFit(newBoard, WHITE, aiShapeState);
+    if (playerNowBlocked && aiNowBlocked) { const w = newPlayerScore > aiScore ? "player" : aiScore > newPlayerScore ? "ai" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setGameOver(w); return; }
     setTurn(WHITE);
     setAiThinking(true);
-  }, [board, turn, gameOver, playerShape, playerScore, aiScore, lockedCells]);
+  }, [board, turn, gameOver, playerShape, playerScore, aiScore, lockedCells, resolveCompletions]);
 
   useEffect(() => {
     if (turn !== WHITE || gameOver || !aiThinking) return;
     const timeout = setTimeout(() => {
-      let currentAiShape = aiShapeState;
-      if (!canShapeFit(board, WHITE, currentAiShape)) {
-        currentAiShape = pickFeasibleShape(board, WHITE);
-        if (!currentAiShape) {
-          if (!canAnyShapeFit(board, BLACK)) setGameOver(playerScore > aiScore ? "player" : aiScore > playerScore ? "ai" : "draw");
-          else setTurn(BLACK);
-          setAiThinking(false); return;
-        }
-        setAiShape(currentAiShape);
-      }
-      const move = aiMove(board, currentAiShape, playerShape);
-      if (!move) { setGameOver(playerScore > aiScore ? "player" : aiScore > playerScore ? "ai" : "draw"); setAiThinking(false); return; }
+      const currentAiShape = aiShapeState;
+      const blocked = !canShapeFit(board, WHITE, currentAiShape);
+      // Even when blocked, AI still plays — defense + center positioning
+      const move = blocked
+        ? aiMove(board, currentAiShape, playerShape) // potentialMap still works for defense
+        : aiMove(board, currentAiShape, playerShape);
+      if (!move) { const w = playerScore > aiScore ? "player" : aiScore > playerScore ? "ai" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setGameOver(w); setAiThinking(false); return; }
       const [r, c] = move;
       const newBoard = board.map((row) => [...row]);
       newBoard[r][c] = WHITE;
       setLastPlaced(`${r},${c}`);
       setMoveCount((m) => m + 1);
-      const match = findCompletedShape(newBoard, WHITE, currentAiShape);
-      let newAiScore = aiScore;
-      let newLocked = new Set(lockedCells);
-      let newFlash = new Set();
-      if (match) {
-        newAiScore = aiScore + currentAiShape.size;
-        match.forEach(([mr, mc]) => { newBoard[mr][mc] = LOCKED_WHITE; newLocked.add(`${mr},${mc}`); newFlash.add(`${mr},${mc}`); });
+
+      const newLocked = new Set(lockedCells);
+      const result = blocked
+        ? { score: 0, shape: currentAiShape, flash: new Set(), splashCells: null }
+        : resolveCompletions(newBoard, WHITE, currentAiShape, newLocked);
+      const newAiScore = aiScore + result.score;
+
+      if (result.score > 0) {
         popKeyRef.current++;
-        setScorePop({ x: r, y: c, pts: currentAiShape.size, key: popKeyRef.current, player: "white" });
+        setScorePop({ x: r, y: c, pts: result.score, key: popKeyRef.current, player: "white" });
+        setSplash(result.splashCells);
         setTimeout(() => setScorePop(null), 1200);
+        setTimeout(() => setSplash(null), 1000);
+        snd(Sounds.shapeComplete);
       }
-      setBoard(newBoard); setAiScore(newAiScore); setLockedCells(newLocked); setFlashCells(newFlash);
-      if (newAiScore >= WIN_SCORE) { setGameOver("ai"); setAiThinking(false); return; }
-      if (match || !canShapeFit(newBoard, WHITE, currentAiShape)) {
-        const next = pickFeasibleShape(newBoard, WHITE);
-        if (next) setAiShape(next);
-        if (!next && !canAnyShapeFit(newBoard, BLACK)) { setGameOver(newAiScore > playerScore ? "ai" : playerScore > newAiScore ? "player" : "draw"); setAiThinking(false); return; }
-      }
-      if (newFlash.size > 0) setTimeout(() => setFlashCells(new Set()), 700);
+      setBoard(newBoard); setAiScore(newAiScore); setLockedCells(newLocked); setFlashCells(result.flash);
+      if (result.shape !== currentAiShape) setAiShape(result.shape);
+      if (newAiScore >= WIN_SCORE) { snd(Sounds.lose); setGameOver("ai"); setAiThinking(false); return; }
+      if (result.flash.size > 0) setTimeout(() => setFlashCells(new Set()), 700);
       const hasEmpty = newBoard.some((row) => row.some((cell) => cell === EMPTY));
-      if (!hasEmpty) { setGameOver(newAiScore > playerScore ? "ai" : playerScore > newAiScore ? "player" : "draw"); setAiThinking(false); return; }
+      if (!hasEmpty) { const w = newAiScore > playerScore ? "ai" : playerScore > newAiScore ? "player" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setGameOver(w); setAiThinking(false); return; }
+      // Both shapes blocked — no more points possible, end the game
+      const aiNowBlocked = !canShapeFit(newBoard, WHITE, result.shape);
+      const playerNowBlocked = !canShapeFit(newBoard, BLACK, playerShape);
+      if (aiNowBlocked && playerNowBlocked) { const w = newAiScore > playerScore ? "ai" : playerScore > newAiScore ? "player" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setGameOver(w); setAiThinking(false); return; }
       setTurn(BLACK); setAiThinking(false);
     }, 600);
     return () => clearTimeout(timeout);
@@ -304,13 +484,15 @@ export default function GobanGame() {
     setBoard(createBoard()); setPlayerShape(randomShape()); setAiShape(randomShape());
     setPlayerScore(0); setAiScore(0); setTurn(BLACK); setGameOver(null);
     setLastPlaced(null); setLockedCells(new Set()); setFlashCells(new Set());
-    setMoveCount(0); setAiThinking(false); setScorePop(null);
+    setMoveCount(0); setAiThinking(false); setScorePop(null); setSplash(null); setHideOverlay(false);
   };
 
-  const cellSize = 40;
+  const { mobile, cellSize } = useLayout();
   const padding = cellSize;
   const boardPx = (BOARD_SIZE - 1) * cellSize + padding * 2;
   const starPoints = [[2,2],[2,6],[6,2],[6,6],[4,4]];
+  const playerBlocked = playerShape && !gameOver && !canShapeFit(board, BLACK, playerShape);
+  const aiBlocked = aiShapeState && !gameOver && !canShapeFit(board, WHITE, aiShapeState);
 
   return (
     <div style={{
@@ -319,7 +501,7 @@ export default function GobanGame() {
       minHeight: "100vh",
       background: "linear-gradient(180deg, #f7f3eb 0%, #ede6d8 100%)",
       display: "flex", flexDirection: "column", alignItems: "center",
-      padding: "28px 16px 40px",
+      padding: mobile ? "12px 0 20px" : "28px 16px 40px",
     }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@300;400;500;600;700&display=swap');
@@ -354,40 +536,102 @@ export default function GobanGame() {
           0% { opacity: 0; transform: scale(0.8); }
           100% { opacity: 1; transform: scale(1); }
         }
+        @keyframes overlayFade {
+          0% { opacity: 0; }
+          100% { opacity: 1; }
+        }
+        @keyframes resultSlideUp {
+          0% { opacity: 0; transform: translate(-50%, -40%) scale(0.85); }
+          60% { opacity: 1; transform: translate(-50%, -52%) scale(1.03); }
+          100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        }
+        @keyframes resultScoreIn {
+          0% { opacity: 0; transform: translate(-50%, 0) scale(0.8); }
+          100% { opacity: 1; transform: translate(-50%, 0) scale(1); }
+        }
+        @keyframes winShimmer {
+          0% { background-position: -200% center; }
+          100% { background-position: 200% center; }
+        }
+        @keyframes splashRing {
+          0% { transform: scale(0); opacity: 0.9; }
+          100% { transform: scale(1); opacity: 0; }
+        }
+        @keyframes splashGlow {
+          0% { opacity: 0; transform: scale(0.5); }
+          25% { opacity: 0.7; transform: scale(1); }
+          100% { opacity: 0; transform: scale(1.3); }
+        }
+        @keyframes splashLine {
+          0% { stroke-dashoffset: 1; opacity: 0.8; }
+          40% { stroke-dashoffset: 0; opacity: 0.9; }
+          100% { stroke-dashoffset: 0; opacity: 0; }
+        }
       `}</style>
 
       {/* Header */}
-      <div style={{ textAlign: "center", marginBottom: 24, animation: "fadeIn 0.6s ease" }}>
+      <div style={{ textAlign: "center", marginBottom: mobile ? 8 : 24, animation: "fadeIn 0.6s ease", position: "relative" }}>
         <h1 style={{
-          fontFamily: "var(--font-display)", fontSize: 42, fontWeight: 300, letterSpacing: "0.22em",
+          fontFamily: "var(--font-display)", fontSize: mobile ? 28 : 42, fontWeight: 300, letterSpacing: "0.22em",
           textTransform: "uppercase", margin: 0, color: "#2a2318",
         }}>Goban</h1>
-        <p style={{
+        <button onClick={() => setMuted(m => !m)} style={{
+          position: "absolute", right: mobile ? 12 : -48, top: "50%", transform: "translateY(-50%)",
+          background: "none", border: "none", cursor: "pointer", padding: 4, opacity: 0.45,
+          transition: "opacity 0.2s",
+        }}
+          onMouseEnter={e => e.currentTarget.style.opacity = "0.8"}
+          onMouseLeave={e => e.currentTarget.style.opacity = "0.45"}
+          aria-label={muted ? "Unmute" : "Mute"}
+        >
+          <svg width={mobile ? 18 : 22} height={mobile ? 18 : 22} viewBox="0 0 24 24" fill="none" stroke="#5a4e3e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+            {muted ? (
+              <><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></>
+            ) : (
+              <><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /></>
+            )}
+          </svg>
+        </button>
+        {!mobile && <p style={{
           fontFamily: "var(--font)", fontSize: 15, color: "#5a4e3e", margin: "6px 0 0",
           letterSpacing: "0.04em", fontWeight: 400,
-        }}>Build shapes on the board · First to {WIN_SCORE}</p>
+        }}>Build shapes on the board · First to {WIN_SCORE}</p>}
       </div>
 
-      {/* Scores */}
-      <div style={{ display: "flex", gap: 40, marginBottom: 20, alignItems: "center" }}>
-        <ScoreBar score={playerScore} maxScore={WIN_SCORE} isBlack={true} label="You · Black" />
-        <div style={{
-          width: 1, height: 48, background: "rgba(61,53,41,0.1)",
-        }} />
-        <ScoreBar score={aiScore} maxScore={WIN_SCORE} isBlack={false} label="AI · White" />
-      </div>
+      {/* Scores + Shape targets — compact row on mobile */}
+      {mobile ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6, width: "100%", justifyContent: "center" }}>
+          <ShapePreview shape={playerShape} label="You" score={playerScore} isActive={turn === BLACK && !gameOver} stoneType="black" compact blocked={playerBlocked} />
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+            <div style={{ fontFamily: "var(--font-display)", fontSize: 22, fontWeight: 700, color: "#2a2318", lineHeight: 1 }}>
+              {playerScore}<span style={{ color: "#9a9284", fontWeight: 400, fontSize: 14 }}> – </span>{aiScore}
+            </div>
+            <div style={{ width: 40, height: 3, borderRadius: 2, background: "rgba(61,53,41,0.12)", overflow: "hidden" }}>
+              <div style={{ height: "100%", borderRadius: 2, width: `${Math.min(((playerScore + aiScore) / (WIN_SCORE * 2)) * 100, 100)}%`, background: "#3d3529", transition: "width 0.6s" }} />
+            </div>
+          </div>
+          <ShapePreview shape={aiShapeState} label="AI" score={aiScore} isActive={turn === WHITE && !gameOver} stoneType="white" compact blocked={aiBlocked} />
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 40, marginBottom: 20, alignItems: "center" }}>
+            <ScoreBar score={playerScore} maxScore={WIN_SCORE} isBlack={true} label="You · Black" />
+            <div style={{ width: 1, height: 48, background: "rgba(61,53,41,0.1)" }} />
+            <ScoreBar score={aiScore} maxScore={WIN_SCORE} isBlack={false} label="AI · White" />
+          </div>
+          <div style={{ display: "flex", gap: 32, marginBottom: 14, alignItems: "flex-start" }}>
+            <ShapePreview shape={playerShape} label="Your target" score={playerScore} isActive={turn === BLACK && !gameOver} stoneType="black" blocked={playerBlocked} />
+            <ShapePreview shape={aiShapeState} label="AI target" score={aiScore} isActive={turn === WHITE && !gameOver} stoneType="white" blocked={aiBlocked} />
+          </div>
+        </>
+      )}
 
-      {/* Shape targets */}
-      <div style={{ display: "flex", gap: 32, marginBottom: 14, alignItems: "flex-start" }}>
-        <ShapePreview shape={playerShape} label="Your target" score={playerScore} isActive={turn === BLACK && !gameOver} stoneType="black" />
-        <ShapePreview shape={aiShapeState} label="AI target" score={aiScore} isActive={turn === WHITE && !gameOver} stoneType="white" />
-      </div>
-
-      {/* Status */}
-      <div style={{ height: 36, display: "flex", alignItems: "center", marginBottom: 12 }}>
+      {/* Status — turn indicator only, game over is shown on the board overlay */}
+      <div style={{ height: mobile ? 28 : 36, display: "flex", alignItems: "center", marginBottom: mobile ? 4 : 12 }}>
         {!gameOver && (
           <div style={{
-            fontFamily: "var(--font)", fontSize: 17, color: turn === BLACK ? "#2a2318" : "#6b5e4e",
+            fontFamily: "var(--font)", fontSize: mobile ? 14 : 17, color: turn === BLACK ? "#2a2318" : "#6b5e4e",
             fontWeight: 600, letterSpacing: "0.02em",
             animation: turn === WHITE ? "pulse 1.2s ease infinite" : "none",
             transition: "color 0.3s",
@@ -395,30 +639,18 @@ export default function GobanGame() {
             {turn === BLACK ? "Your turn" : "Thinking…"}
           </div>
         )}
-        {gameOver && (
-          <div style={{ textAlign: "center", animation: "gameOverIn 0.5s cubic-bezier(0.34,1.56,0.64,1)" }}>
-            <div style={{
-              fontFamily: "var(--font-display)", fontSize: 26, fontWeight: 700, letterSpacing: "0.04em",
-              color: gameOver === "player" ? "#2d6a4f" : gameOver === "ai" ? "#9b2226" : "#5a4e3e",
-            }}>
-              {gameOver === "player" ? "You win" : gameOver === "ai" ? "AI wins" : "Draw"}
-            </div>
-            <div style={{ fontFamily: "var(--font)", fontSize: 14, color: "#5a4e3e", marginTop: 3, fontWeight: 500 }}>
-              {playerScore >= WIN_SCORE || aiScore >= WIN_SCORE
-                ? `${playerScore} – ${aiScore}`
-                : `Board locked · ${playerScore} – ${aiScore}`}
-            </div>
-          </div>
-        )}
+        {gameOver && <div style={{ height: mobile ? 28 : 36 }} />}
       </div>
 
       {/* Board */}
-      <div style={{ position: "relative", borderRadius: 8, overflow: "hidden", flexShrink: 0,
-        boxShadow: "0 2px 4px rgba(0,0,0,0.06), 0 12px 40px rgba(61,53,41,0.12), inset 0 1px 0 rgba(255,255,255,0.3)",
+      <div onClick={gameOver ? () => setHideOverlay(h => !h) : undefined} style={{ position: "relative", borderRadius: mobile ? 0 : 8, overflow: "hidden", flexShrink: 0,
+        boxShadow: mobile ? "none" : "0 2px 4px rgba(0,0,0,0.06), 0 12px 40px rgba(61,53,41,0.12), inset 0 1px 0 rgba(255,255,255,0.3)",
+        width: mobile ? "100%" : "auto",
+        cursor: gameOver ? "pointer" : "default",
       }}>
         {/* Wood texture bg */}
-        <svg width={boardPx} height={boardPx} viewBox={`0 0 ${boardPx} ${boardPx}`}
-          style={{ display: "block", cursor: turn === BLACK && !gameOver ? "crosshair" : "default" }}>
+        <svg width={mobile ? "100%" : boardPx} height={mobile ? "auto" : boardPx} viewBox={`0 0 ${boardPx} ${boardPx}`}
+          style={{ display: "block", cursor: turn === BLACK && !gameOver ? "crosshair" : "default", aspectRatio: "1 / 1" }}>
           {/* Board background with wood grain */}
           <defs>
             <linearGradient id="woodGrad" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -467,11 +699,51 @@ export default function GobanGame() {
               const isLocked = cell === LOCKED_BLACK || cell === LOCKED_WHITE;
               const radius = cellSize / 2 - 3;
               return <Stone key={`${r}-${c}`} cx={cx} cy={cy} radius={radius}
-                isBlack={isBlack} isLocked={isLocked}
+                isBlack={isBlack} isLocked={isLocked} gameOver={gameOver}
                 isFlash={flashCells.has(`${r},${c}`)}
                 isLast={lastPlaced === `${r},${c}`} />;
             })
           )}
+
+          {/* Shape completion splash */}
+          {splash && (() => {
+            const pts = splash.cells.map(([r, c]) => [padding + c * cellSize, padding + r * cellSize]);
+            const cx0 = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+            const cy0 = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+            const color = splash.isBlack ? "rgba(207,164,70," : "rgba(180,170,150,";
+            // Build outline path connecting stones in order
+            const sorted = [...pts].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+            const pathD = sorted.map((p, i) => `${i === 0 ? "M" : "L"}${p[0]},${p[1]}`).join(" ") + " Z";
+            const pathLen = sorted.reduce((sum, p, i) => {
+              if (i === 0) return 0;
+              const prev = sorted[i - 1];
+              return sum + Math.sqrt((p[0] - prev[0]) ** 2 + (p[1] - prev[1]) ** 2);
+            }, 0) + Math.sqrt((sorted[0][0] - sorted[sorted.length-1][0]) ** 2 + (sorted[0][1] - sorted[sorted.length-1][1]) ** 2);
+            return (
+              <g key={splash.key} style={{ pointerEvents: "none" }}>
+                {/* Expanding rings from each stone */}
+                {pts.map(([x, y], i) => (
+                  <g key={i}>
+                    <circle cx={x} cy={y} r={cellSize * 0.9}
+                      fill="none" stroke={`${color}0.7)`} strokeWidth={3}
+                      style={{ transformOrigin: `${x}px ${y}px`, animation: `splashRing 0.8s ${i * 0.06}s ease-out forwards` }} />
+                    <circle cx={x} cy={y} r={cellSize * 1.1}
+                      fill="none" stroke={`${color}0.35)`} strokeWidth={2}
+                      style={{ transformOrigin: `${x}px ${y}px`, animation: `splashRing 0.8s ${i * 0.06 + 0.1}s ease-out forwards` }} />
+                  </g>
+                ))}
+                {/* Golden glow at center of shape */}
+                <circle cx={cx0} cy={cy0} r={cellSize * 1.2}
+                  fill={`${color}0.3)`}
+                  style={{ transformOrigin: `${cx0}px ${cy0}px`, animation: "splashGlow 0.9s ease-out forwards", filter: "blur(10px)" }} />
+                {/* Connecting outline that draws in */}
+                <path d={pathD} fill="none"
+                  stroke={`${color}0.6)`} strokeWidth={2.5} strokeLinejoin="round"
+                  strokeDasharray={pathLen} strokeDashoffset={pathLen}
+                  style={{ animation: `splashLine 0.9s ease-out forwards` }} />
+              </g>
+            );
+          })()}
 
           {/* Score pop-up */}
           {scorePop && (
@@ -508,12 +780,62 @@ export default function GobanGame() {
             })
           )}
         </svg>
+
+        {/* Game over overlay */}
+        {gameOver && !hideOverlay && (
+          <div style={{
+            position: "absolute", inset: 0,
+            background: gameOver === "player"
+              ? "radial-gradient(ellipse at center, rgba(45,106,79,0.25) 0%, rgba(45,106,79,0.5) 100%)"
+              : gameOver === "ai"
+              ? "radial-gradient(ellipse at center, rgba(40,20,10,0.35) 0%, rgba(40,20,10,0.6) 100%)"
+              : "radial-gradient(ellipse at center, rgba(60,50,35,0.3) 0%, rgba(60,50,35,0.5) 100%)",
+            animation: "overlayFade 0.6s ease-out forwards",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            pointerEvents: "none",
+          }}>
+            <div style={{
+              position: "absolute", left: "50%", top: "50%",
+              animation: "resultSlideUp 0.7s cubic-bezier(0.34,1.56,0.64,1) forwards",
+              textAlign: "center", pointerEvents: "none",
+            }}>
+              <div style={{
+                fontFamily: "var(--font-display)",
+                fontSize: mobile ? 44 : 56,
+                fontWeight: 700,
+                letterSpacing: "0.08em",
+                textTransform: "uppercase",
+                color: "#f7f3eb",
+                textShadow: "0 2px 16px rgba(0,0,0,0.5), 0 0 40px rgba(0,0,0,0.3)",
+                lineHeight: 1,
+                whiteSpace: "nowrap",
+                ...(gameOver === "player" ? {
+                  background: "linear-gradient(90deg, #74c69d, #b7e4c7, #d8f3dc, #b7e4c7, #74c69d)",
+                  backgroundSize: "200% auto",
+                  WebkitBackgroundClip: "text",
+                  WebkitTextFillColor: "transparent",
+                  backgroundClip: "text",
+                  animation: "winShimmer 2s ease-in-out infinite",
+                } : {}),
+              }}>
+                {gameOver === "player" ? "You Win" : gameOver === "ai" ? "AI Wins" : "Draw"}
+              </div>
+              <div style={{
+                fontFamily: "var(--font)", fontSize: mobile ? 18 : 22, fontWeight: 400,
+                color: "#f7f3eb", textShadow: "0 1px 8px rgba(0,0,0,0.4)",
+                marginTop: 8, opacity: 0.85,
+              }}>
+                {playerScore} – {aiScore}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* New game */}
       <button onClick={resetGame} style={{
-        marginTop: 24, padding: "12px 36px",
-        fontFamily: "var(--font)", fontSize: 15, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase",
+        marginTop: mobile ? 10 : 24, padding: mobile ? "8px 24px" : "12px 36px",
+        fontFamily: "var(--font)", fontSize: mobile ? 13 : 15, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase",
         border: "2px solid rgba(61,53,41,0.3)", borderRadius: 6,
         background: "rgba(255,252,245,0.6)",
         color: "#2a2318", cursor: "pointer", transition: "all 0.25s cubic-bezier(0.4,0,0.2,1)",
@@ -524,8 +846,9 @@ export default function GobanGame() {
 
       {/* Rules */}
       <p style={{
-        fontFamily: "var(--font)", fontSize: 14, color: "#5a4e3e", maxWidth: 380,
-        textAlign: "center", lineHeight: 1.7, marginTop: 18, fontWeight: 400,
+        fontFamily: "var(--font)", fontSize: mobile ? 12 : 14, color: "#5a4e3e", maxWidth: 380,
+        textAlign: "center", lineHeight: 1.7, marginTop: mobile ? 10 : 18, fontWeight: 400,
+        padding: mobile ? "0 20px" : 0,
       }}>
         Place stones to form your target shape in any rotation. Completed shapes lock and score points.
         Block your opponent to slow them down.
