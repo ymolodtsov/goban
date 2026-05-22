@@ -155,7 +155,6 @@ function canShapeFit(board, player, shape) {
 const AI_TEMPERATURE = 1.2;
 
 function findPlacements(board, player, shape) {
-  const locked = player === BLACK ? LOCKED_BLACK : LOCKED_WHITE;
   const results = [];
   for (const rot of shape.rotations) {
     for (let bR = 0; bR <= BOARD_SIZE - 1; bR++) {
@@ -167,7 +166,8 @@ function findPlacements(board, player, shape) {
         const emptyCells = [];
         for (const [r, c] of cells) {
           const v = board[r][c];
-          if (v === player || v === locked) filled++;
+          // Only active (unlocked) stones count as progress — locked stones are occupied
+          if (v === player) filled++;
           else if (v === EMPTY) emptyCells.push([r, c]);
           else { blocked = true; break; }
         }
@@ -320,9 +320,6 @@ function ShapePreview({ shape, label, score, isActive, stoneType, compact, block
           </div>
         )}
       </div>
-      <span style={{ fontFamily: "var(--font)", fontSize: compact ? 12 : 15, fontWeight: 700, color: blocked ? "#8a7e6e" : "#2a2318", transition: "color 0.4s" }}>
-        {shape.name}-piece · {shape.size}pts
-      </span>
     </div>
   );
 }
@@ -569,30 +566,32 @@ export default function GobanGame() {
         }
       `}</style>
 
+      {/* Mute button */}
+      <button onClick={() => setMuted(m => !m)} style={{
+        position: "fixed", right: 12, top: mobile ? 14 : 20, zIndex: 10,
+        background: "none", border: "none", cursor: "pointer", padding: 4, opacity: 0.45,
+        transition: "opacity 0.2s",
+      }}
+        onMouseEnter={e => e.currentTarget.style.opacity = "0.8"}
+        onMouseLeave={e => e.currentTarget.style.opacity = "0.45"}
+        aria-label={muted ? "Unmute" : "Mute"}
+      >
+        <svg width={mobile ? 18 : 22} height={mobile ? 18 : 22} viewBox="0 0 24 24" fill="none" stroke="#5a4e3e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+          {muted ? (
+            <><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></>
+          ) : (
+            <><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /></>
+          )}
+        </svg>
+      </button>
+
       {/* Header */}
-      <div style={{ textAlign: "center", marginBottom: mobile ? 8 : 24, animation: "fadeIn 0.6s ease", position: "relative" }}>
+      <div style={{ textAlign: "center", marginBottom: mobile ? 8 : 24, animation: "fadeIn 0.6s ease" }}>
         <h1 style={{
           fontFamily: "var(--font-display)", fontSize: mobile ? 28 : 42, fontWeight: 300, letterSpacing: "0.22em",
           textTransform: "uppercase", margin: 0, color: "#2a2318",
         }}>Goban</h1>
-        <button onClick={() => setMuted(m => !m)} style={{
-          position: "absolute", right: mobile ? 12 : -48, top: "50%", transform: "translateY(-50%)",
-          background: "none", border: "none", cursor: "pointer", padding: 4, opacity: 0.45,
-          transition: "opacity 0.2s",
-        }}
-          onMouseEnter={e => e.currentTarget.style.opacity = "0.8"}
-          onMouseLeave={e => e.currentTarget.style.opacity = "0.45"}
-          aria-label={muted ? "Unmute" : "Mute"}
-        >
-          <svg width={mobile ? 18 : 22} height={mobile ? 18 : 22} viewBox="0 0 24 24" fill="none" stroke="#5a4e3e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-            {muted ? (
-              <><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></>
-            ) : (
-              <><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /></>
-            )}
-          </svg>
-        </button>
         {!mobile && <p style={{
           fontFamily: "var(--font)", fontSize: 15, color: "#5a4e3e", margin: "6px 0 0",
           letterSpacing: "0.04em", fontWeight: 400,
@@ -659,12 +658,14 @@ export default function GobanGame() {
               <stop offset="60%" stopColor="#c99b38" />
               <stop offset="100%" stopColor="#c08e30" />
             </linearGradient>
-            <pattern id="grain" width="200" height="200" patternUnits="userSpaceOnUse">
-              <rect width="200" height="200" fill="url(#woodGrad)" />
-              {[...Array(12)].map((_, i) => (
-                <line key={i} x1={0} y1={i * 17 + 3} x2={200} y2={i * 17 + 8}
-                  stroke="rgba(120,80,20,0.06)" strokeWidth={1 + Math.random()} />
-              ))}
+            <pattern id="grain" width={boardPx / 2} height={boardPx / 2} patternUnits="userSpaceOnUse">
+              <rect width={boardPx / 2} height={boardPx / 2} fill="url(#woodGrad)" />
+              {[...Array(12)].map((_, i) => {
+                const tileH = boardPx / 2;
+                const spacing = tileH / 12;
+                return <line key={i} x1={0} y1={i * spacing + spacing * 0.15} x2={boardPx / 2} y2={i * spacing + spacing * 0.4}
+                  stroke="rgba(120,80,20,0.06)" strokeWidth={1.2} />;
+              })}
             </pattern>
             <filter id="boardShadow">
               <feDropShadow dx="0" dy="1" stdDeviation="1.5" floodColor="rgba(0,0,0,0.1)" />
