@@ -203,17 +203,20 @@ function softmaxSample(items, temperature) {
   return items[items.length - 1];
 }
 
-function aiMove(board, aiShape, playerShape) {
+function aiMove(board, aiShape, playerShape, blocked = false) {
   const empty = [];
   for (let r = 0; r < BOARD_SIZE; r++)
     for (let c = 0; c < BOARD_SIZE; c++)
       if (board[r][c] === EMPTY) empty.push([r, c]);
   if (!empty.length) return null;
 
-  for (const [r, c] of empty) {
-    const b = board.map((row) => [...row]);
-    b[r][c] = WHITE;
-    if (findCompletedShape(b, WHITE, aiShape)) return [r, c];
+  // Skip offense win-check when blocked — no placement can complete the shape
+  if (!blocked) {
+    for (const [r, c] of empty) {
+      const b = board.map((row) => [...row]);
+      b[r][c] = WHITE;
+      if (findCompletedShape(b, WHITE, aiShape)) return [r, c];
+    }
   }
 
   for (const [r, c] of empty) {
@@ -225,12 +228,15 @@ function aiMove(board, aiShape, playerShape) {
   const offenseMap = potentialMap(board, WHITE, aiShape);
   const defenseMap = potentialMap(board, BLACK, playerShape);
 
+  // When blocked, scoring is impossible — shift weight entirely to defense
+  const offW = blocked ? 0 : 1.1;
+  const defW = blocked ? 1.3 : 0.9;
   const scored = empty.map(([r, c]) => {
     const offense = offenseMap[r][c];
     const defense = defenseMap[r][c];
     const ctr = (BOARD_SIZE - 1) / 2;
     const centerBonus = (1 - (Math.abs(r - ctr) + Math.abs(c - ctr)) / BOARD_SIZE) * 0.3;
-    return { move: [r, c], score: offense * 1.1 + defense * 0.9 + centerBonus };
+    return { move: [r, c], score: offense * offW + defense * defW + centerBonus };
   });
 
   const pick = softmaxSample(scored, AI_TEMPERATURE);
@@ -430,17 +436,14 @@ export default function GobanGame() {
     if (playerNowBlocked && aiNowBlocked) { const w = newPlayerScore > aiScore ? "player" : aiScore > newPlayerScore ? "ai" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setGameOver(w); return; }
     setTurn(WHITE);
     setAiThinking(true);
-  }, [board, turn, gameOver, playerShape, playerScore, aiScore, lockedCells, resolveCompletions]);
+  }, [board, turn, gameOver, playerShape, aiShapeState, playerScore, aiScore, lockedCells, resolveCompletions, snd]);
 
   useEffect(() => {
     if (turn !== WHITE || gameOver || !aiThinking) return;
     const timeout = setTimeout(() => {
       const currentAiShape = aiShapeState;
       const blocked = !canShapeFit(board, WHITE, currentAiShape);
-      // Even when blocked, AI still plays — defense + center positioning
-      const move = blocked
-        ? aiMove(board, currentAiShape, playerShape) // potentialMap still works for defense
-        : aiMove(board, currentAiShape, playerShape);
+      const move = aiMove(board, currentAiShape, playerShape, blocked);
       if (!move) { const w = playerScore > aiScore ? "player" : aiScore > playerScore ? "ai" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setGameOver(w); setAiThinking(false); return; }
       const [r, c] = move;
       const newBoard = board.map((row) => [...row]);
@@ -475,7 +478,7 @@ export default function GobanGame() {
       setTurn(BLACK); setAiThinking(false);
     }, 600);
     return () => clearTimeout(timeout);
-  }, [turn, aiThinking]);
+  }, [turn, gameOver, aiThinking, board, aiShapeState, playerShape, playerScore, aiScore, lockedCells, resolveCompletions, snd]);
 
   const resetGame = () => {
     setBoard(createBoard()); setPlayerShape(randomShape()); setAiShape(randomShape());
