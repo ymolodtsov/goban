@@ -358,7 +358,8 @@ export default function GobanGame() {
   const [playerScore, setPlayerScore] = useState(0);
   const [aiScore, setAiScore] = useState(0);
   const [turn, setTurn] = useState(BLACK);
-  const [gameOver, setGameOver] = useState(null);
+  const [gameOver, setGameOver] = useState(null); // null | "player" | "ai" | "draw"
+  const [endReason, setEndReason] = useState(null); // null | "score" | "board_full" | "both_blocked"
   const [lastPlaced, setLastPlaced] = useState(null);
   const [lockedCells, setLockedCells] = useState(new Set());
   const [flashCells, setFlashCells] = useState(new Set());
@@ -426,14 +427,14 @@ export default function GobanGame() {
     setFlashCells(result.flash);
     if (result.shape !== playerShape) setPlayerShape(result.shape);
 
-    if (newPlayerScore >= WIN_SCORE) { snd(Sounds.win); setGameOver("player"); return; }
+    if (newPlayerScore >= WIN_SCORE) { snd(Sounds.win); setEndReason("score"); setGameOver("player"); return; }
     if (result.flash.size > 0) setTimeout(() => setFlashCells(new Set()), 700);
     const hasEmpty = newBoard.some((row) => row.some((cell) => cell === EMPTY));
-    if (!hasEmpty) { const w = newPlayerScore > aiScore ? "player" : aiScore > newPlayerScore ? "ai" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setGameOver(w); return; }
+    if (!hasEmpty) { const w = newPlayerScore > aiScore ? "player" : aiScore > newPlayerScore ? "ai" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setEndReason("board_full"); setGameOver(w); return; }
     // Both shapes blocked — no more points possible, end the game
     const playerNowBlocked = !canShapeFit(newBoard, BLACK, result.shape);
     const aiNowBlocked = !canShapeFit(newBoard, WHITE, aiShapeState);
-    if (playerNowBlocked && aiNowBlocked) { const w = newPlayerScore > aiScore ? "player" : aiScore > newPlayerScore ? "ai" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setGameOver(w); return; }
+    if (playerNowBlocked && aiNowBlocked) { const w = newPlayerScore > aiScore ? "player" : aiScore > newPlayerScore ? "ai" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setEndReason("both_blocked"); setGameOver(w); return; }
     setTurn(WHITE);
     setAiThinking(true);
   }, [board, turn, gameOver, playerShape, aiShapeState, playerScore, aiScore, lockedCells, resolveCompletions, snd]);
@@ -449,7 +450,7 @@ export default function GobanGame() {
       const currentAiShape = aiShapeState;
       const blocked = !canShapeFit(board, WHITE, currentAiShape);
       const move = aiMove(board, currentAiShape, playerShape, blocked);
-      if (!move) { const w = playerScore > aiScore ? "player" : aiScore > playerScore ? "ai" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setGameOver(w); setAiThinking(false); return; }
+      if (!move) { const w = playerScore > aiScore ? "player" : aiScore > playerScore ? "ai" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setEndReason("board_full"); setGameOver(w); setAiThinking(false); return; }
       const [r, c] = move;
       const newBoard = board.map((row) => [...row]);
       newBoard[r][c] = WHITE;
@@ -484,14 +485,14 @@ export default function GobanGame() {
       }
       setAiScore(newAiScore); setLockedCells(newLocked); setFlashCells(result.flash);
       if (result.shape !== currentAiShape) setAiShape(result.shape);
-      if (newAiScore >= WIN_SCORE) { snd(Sounds.lose); setGameOver("ai"); setAiThinking(false); return; }
+      if (newAiScore >= WIN_SCORE) { snd(Sounds.lose); setEndReason("score"); setGameOver("ai"); setAiThinking(false); return; }
       if (result.flash.size > 0) setTimeout(() => setFlashCells(new Set()), 700);
       const hasEmpty = newBoard.some((row) => row.some((cell) => cell === EMPTY));
-      if (!hasEmpty) { const w = newAiScore > playerScore ? "ai" : playerScore > newAiScore ? "player" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setGameOver(w); setAiThinking(false); return; }
+      if (!hasEmpty) { const w = newAiScore > playerScore ? "ai" : playerScore > newAiScore ? "player" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setEndReason("board_full"); setGameOver(w); setAiThinking(false); return; }
       // Both shapes blocked — no more points possible, end the game
       const aiNowBlocked = !canShapeFit(newBoard, WHITE, result.shape);
       const playerNowBlocked = !canShapeFit(newBoard, BLACK, playerShape);
-      if (aiNowBlocked && playerNowBlocked) { const w = newAiScore > playerScore ? "ai" : playerScore > newAiScore ? "player" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setGameOver(w); setAiThinking(false); return; }
+      if (aiNowBlocked && playerNowBlocked) { const w = newAiScore > playerScore ? "ai" : playerScore > newAiScore ? "player" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setEndReason("both_blocked"); setGameOver(w); setAiThinking(false); return; }
       setTurn(BLACK); setAiThinking(false);
     }, 300); // delay to let the stone-pop animation finish
     return () => clearTimeout(timeout);
@@ -501,7 +502,7 @@ export default function GobanGame() {
     setBoard(createBoard()); setPlayerShape(randomShape()); setAiShape(randomShape());
     setPlayerScore(0); setAiScore(0); setTurn(BLACK); setGameOver(null);
     setLastPlaced(null); setLockedCells(new Set()); setFlashCells(new Set());
-    setMoveCount(0); setAiThinking(false); setAiPending(null); setScorePop(null); setSplash(null); setHideOverlay(false);
+    setMoveCount(0); setAiThinking(false); setAiPending(null); setScorePop(null); setSplash(null); setHideOverlay(false); setEndReason(null);
   };
 
   const { mobile, cellSize } = useLayout();
@@ -848,6 +849,15 @@ export default function GobanGame() {
               }}>
                 {playerScore} – {aiScore}
               </div>
+              {endReason === "both_blocked" && (
+                <div style={{
+                  fontFamily: "var(--font)", fontSize: mobile ? 12 : 14, fontWeight: 400,
+                  color: "#f7f3eb", textShadow: "0 1px 6px rgba(0,0,0,0.3)",
+                  marginTop: 6, opacity: 0.65, letterSpacing: "0.04em",
+                }}>
+                  Both players blocked
+                </div>
+              )}
             </div>
           </div>
         )}
