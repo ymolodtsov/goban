@@ -650,10 +650,6 @@ export default function GobanGame() {
           0% { opacity: 0; transform: translate(-50%, 0) scale(0.8); }
           100% { opacity: 1; transform: translate(-50%, 0) scale(1); }
         }
-        @keyframes winShimmer {
-          0% { background-position: -200% center; }
-          100% { background-position: 200% center; }
-        }
         @keyframes splashRing {
           0% { transform: scale(0); opacity: 0.9; }
           100% { transform: scale(1); opacity: 0; }
@@ -890,11 +886,7 @@ export default function GobanGame() {
         {gameOver && !hideOverlay && (
           <div style={{
             position: "absolute", inset: 0,
-            background: gameOver === "player"
-              ? "radial-gradient(ellipse at center, rgba(45,106,79,0.25) 0%, rgba(45,106,79,0.5) 100%)"
-              : gameOver === "ai"
-              ? "radial-gradient(ellipse at center, rgba(40,20,10,0.35) 0%, rgba(40,20,10,0.6) 100%)"
-              : "radial-gradient(ellipse at center, rgba(60,50,35,0.3) 0%, rgba(60,50,35,0.5) 100%)",
+            background: "radial-gradient(ellipse at center, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.3) 50%, rgba(0,0,0,0.1) 100%)",
             animation: "overlayFade 0.6s ease-out forwards",
             display: "flex", alignItems: "center", justifyContent: "center",
             pointerEvents: "none",
@@ -904,48 +896,31 @@ export default function GobanGame() {
               animation: "resultSlideUp 0.7s cubic-bezier(0.34,1.56,0.64,1) forwards",
               textAlign: "center", pointerEvents: "none",
             }}>
-              {/* Dark backdrop for text legibility */}
-              <div style={{
-                position: "absolute", left: "50%", top: "50%", transform: "translate(-50%, -50%)",
-                width: mobile ? 240 : 320, height: mobile ? 140 : 180, borderRadius: "50%",
-                background: "radial-gradient(ellipse at center, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.25) 50%, transparent 100%)",
-                filter: "blur(10px)", pointerEvents: "none",
-              }} />
               <div style={{
                 fontFamily: "var(--font-display)",
                 fontSize: mobile ? 44 : 56,
                 fontWeight: 700,
                 letterSpacing: "0.08em",
                 textTransform: "uppercase",
-                color: "#f7f3eb",
-                textShadow: "0 2px 20px rgba(0,0,0,0.7), 0 0 50px rgba(0,0,0,0.4), 0 4px 8px rgba(0,0,0,0.5)",
+                color: gameOver === "player" ? "#b7e4c7" : "#f7f3eb",
+                textShadow: "0 2px 16px rgba(0,0,0,0.5), 0 0 40px rgba(0,0,0,0.3)",
                 lineHeight: 1,
                 whiteSpace: "nowrap",
-                position: "relative",
-                ...(gameOver === "player" ? {
-                  background: "linear-gradient(90deg, #74c69d, #b7e4c7, #d8f3dc, #b7e4c7, #74c69d)",
-                  backgroundSize: "200% auto",
-                  WebkitBackgroundClip: "text",
-                  WebkitTextFillColor: "transparent",
-                  backgroundClip: "text",
-                  animation: "winShimmer 2s ease-in-out infinite",
-                } : {}),
               }}>
                 {gameOver === "player" ? "You Win" : gameOver === "ai" ? "AI Wins" : "Draw"}
               </div>
               <div style={{
                 fontFamily: "var(--font)", fontSize: mobile ? 20 : 24, fontWeight: 500,
-                color: "#f7f3eb", textShadow: "0 2px 12px rgba(0,0,0,0.6), 0 0 30px rgba(0,0,0,0.3)",
-                marginTop: 8, position: "relative",
+                color: "#f7f3eb", textShadow: "0 2px 12px rgba(0,0,0,0.5)",
+                marginTop: 8,
               }}>
                 {playerScore} – {aiScore}
               </div>
               {endReason === "both_blocked" && (
                 <div style={{
                   fontFamily: "var(--font)", fontSize: mobile ? 15 : 18, fontWeight: 600,
-                  color: "#f7f3eb", textShadow: "0 2px 12px rgba(0,0,0,0.6), 0 0 20px rgba(0,0,0,0.3)",
+                  color: "#f7f3eb", textShadow: "0 2px 12px rgba(0,0,0,0.5)",
                   marginTop: 8, letterSpacing: "0.08em", textTransform: "uppercase",
-                  position: "relative",
                 }}>
                   Deadlock
                 </div>
