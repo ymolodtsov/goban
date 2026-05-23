@@ -438,8 +438,13 @@ export default function GobanGame() {
     setAiThinking(true);
   }, [board, turn, gameOver, playerShape, aiShapeState, playerScore, aiScore, lockedCells, resolveCompletions, snd]);
 
+  // AI move is split into two phases:
+  // Phase 1 (aiPending === null): decide move, place stone, render it
+  // Phase 2 (aiPending !== null): after stone lands, resolve completions + end-of-turn
+  const [aiPending, setAiPending] = useState(null);
+
   useEffect(() => {
-    if (turn !== WHITE || gameOver || !aiThinking) return;
+    if (turn !== WHITE || gameOver || !aiThinking || aiPending) return;
     const timeout = setTimeout(() => {
       const currentAiShape = aiShapeState;
       const blocked = !canShapeFit(board, WHITE, currentAiShape);
@@ -448,8 +453,20 @@ export default function GobanGame() {
       const [r, c] = move;
       const newBoard = board.map((row) => [...row]);
       newBoard[r][c] = WHITE;
+      snd(Sounds.stonePlace);
+      setBoard(newBoard);
       setLastPlaced(`${r},${c}`);
       setMoveCount((m) => m + 1);
+      setAiPending({ board: newBoard, r, c, shape: currentAiShape, blocked });
+    }, 600);
+    return () => clearTimeout(timeout);
+  }, [turn, gameOver, aiThinking, aiPending, board, aiShapeState, playerShape, playerScore, aiScore, snd]);
+
+  useEffect(() => {
+    if (!aiPending) return;
+    const timeout = setTimeout(() => {
+      const { board: newBoard, r, c, shape: currentAiShape, blocked } = aiPending;
+      setAiPending(null);
 
       const newLocked = new Set(lockedCells);
       const result = blocked
@@ -465,7 +482,7 @@ export default function GobanGame() {
         setTimeout(() => setSplash(null), 1000);
         snd(Sounds.shapeComplete);
       }
-      setBoard(newBoard); setAiScore(newAiScore); setLockedCells(newLocked); setFlashCells(result.flash);
+      setAiScore(newAiScore); setLockedCells(newLocked); setFlashCells(result.flash);
       if (result.shape !== currentAiShape) setAiShape(result.shape);
       if (newAiScore >= WIN_SCORE) { snd(Sounds.lose); setGameOver("ai"); setAiThinking(false); return; }
       if (result.flash.size > 0) setTimeout(() => setFlashCells(new Set()), 700);
@@ -476,15 +493,15 @@ export default function GobanGame() {
       const playerNowBlocked = !canShapeFit(newBoard, BLACK, playerShape);
       if (aiNowBlocked && playerNowBlocked) { const w = newAiScore > playerScore ? "ai" : playerScore > newAiScore ? "player" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setGameOver(w); setAiThinking(false); return; }
       setTurn(BLACK); setAiThinking(false);
-    }, 600);
+    }, 300); // delay to let the stone-pop animation finish
     return () => clearTimeout(timeout);
-  }, [turn, gameOver, aiThinking, board, aiShapeState, playerShape, playerScore, aiScore, lockedCells, resolveCompletions, snd]);
+  }, [aiPending, aiScore, playerScore, playerShape, lockedCells, resolveCompletions, snd]);
 
   const resetGame = () => {
     setBoard(createBoard()); setPlayerShape(randomShape()); setAiShape(randomShape());
     setPlayerScore(0); setAiScore(0); setTurn(BLACK); setGameOver(null);
     setLastPlaced(null); setLockedCells(new Set()); setFlashCells(new Set());
-    setMoveCount(0); setAiThinking(false); setScorePop(null); setSplash(null); setHideOverlay(false);
+    setMoveCount(0); setAiThinking(false); setAiPending(null); setScorePop(null); setSplash(null); setHideOverlay(false);
   };
 
   const { mobile, cellSize } = useLayout();
