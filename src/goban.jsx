@@ -904,6 +904,13 @@ export default function GobanGame() {
               animation: "resultSlideUp 0.7s cubic-bezier(0.34,1.56,0.64,1) forwards",
               textAlign: "center", pointerEvents: "none",
             }}>
+              {/* Dark backdrop for text legibility */}
+              <div style={{
+                position: "absolute", left: "50%", top: "50%", transform: "translate(-50%, -50%)",
+                width: mobile ? 240 : 320, height: mobile ? 140 : 180, borderRadius: "50%",
+                background: "radial-gradient(ellipse at center, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.25) 50%, transparent 100%)",
+                filter: "blur(10px)", pointerEvents: "none",
+              }} />
               <div style={{
                 fontFamily: "var(--font-display)",
                 fontSize: mobile ? 44 : 56,
@@ -911,9 +918,10 @@ export default function GobanGame() {
                 letterSpacing: "0.08em",
                 textTransform: "uppercase",
                 color: "#f7f3eb",
-                textShadow: "0 2px 16px rgba(0,0,0,0.5), 0 0 40px rgba(0,0,0,0.3)",
+                textShadow: "0 2px 20px rgba(0,0,0,0.7), 0 0 50px rgba(0,0,0,0.4), 0 4px 8px rgba(0,0,0,0.5)",
                 lineHeight: 1,
                 whiteSpace: "nowrap",
+                position: "relative",
                 ...(gameOver === "player" ? {
                   background: "linear-gradient(90deg, #74c69d, #b7e4c7, #d8f3dc, #b7e4c7, #74c69d)",
                   backgroundSize: "200% auto",
@@ -926,17 +934,18 @@ export default function GobanGame() {
                 {gameOver === "player" ? "You Win" : gameOver === "ai" ? "AI Wins" : "Draw"}
               </div>
               <div style={{
-                fontFamily: "var(--font)", fontSize: mobile ? 18 : 22, fontWeight: 400,
-                color: "#f7f3eb", textShadow: "0 1px 8px rgba(0,0,0,0.4)",
-                marginTop: 8, opacity: 0.85,
+                fontFamily: "var(--font)", fontSize: mobile ? 20 : 24, fontWeight: 500,
+                color: "#f7f3eb", textShadow: "0 2px 12px rgba(0,0,0,0.6), 0 0 30px rgba(0,0,0,0.3)",
+                marginTop: 8, position: "relative",
               }}>
                 {playerScore} – {aiScore}
               </div>
               {endReason === "both_blocked" && (
                 <div style={{
-                  fontFamily: "var(--font)", fontSize: mobile ? 12 : 14, fontWeight: 400,
-                  color: "#f7f3eb", textShadow: "0 1px 6px rgba(0,0,0,0.3)",
-                  marginTop: 6, opacity: 0.65, letterSpacing: "0.04em",
+                  fontFamily: "var(--font)", fontSize: mobile ? 15 : 18, fontWeight: 600,
+                  color: "#f7f3eb", textShadow: "0 2px 12px rgba(0,0,0,0.6), 0 0 20px rgba(0,0,0,0.3)",
+                  marginTop: 8, letterSpacing: "0.08em", textTransform: "uppercase",
+                  position: "relative",
                 }}>
                   Deadlock
                 </div>
