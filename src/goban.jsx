@@ -855,7 +855,7 @@ export default function GobanGame() {
                   color: "#f7f3eb", textShadow: "0 1px 6px rgba(0,0,0,0.3)",
                   marginTop: 6, opacity: 0.65, letterSpacing: "0.04em",
                 }}>
-                  Both players blocked
+                  Deadlock
                 </div>
               )}
             </div>
