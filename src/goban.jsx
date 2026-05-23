@@ -374,32 +374,118 @@ export default function GobanGame() {
   mutedRef.current = muted;
   const snd = useCallback((fn) => { if (!mutedRef.current) fn(); }, []);
 
-  // Resolve completed shapes for a player, including chain completions.
-  // Mutates board/locked in place, returns { score, shape, flash, splashCells }.
-  // After completion, assigns a new random shape (no feasibility filter — blocked shapes stay).
-  const resolveCompletions = useCallback((board, player, shape, locked) => {
-    let totalScore = 0;
+  // Pre-compute all chain completion steps. Mutates board and locked in place.
+  // Returns array of steps, each with a board/locked snapshot for progressive rendering.
+  const computeChain = useCallback((board, player, shape, locked) => {
+    const steps = [];
     let currentShape = shape;
-    const allFlash = new Set();
-    let lastSplash = null;
     const isBlack = player === BLACK;
     const lockedType = isBlack ? LOCKED_BLACK : LOCKED_WHITE;
-
     while (currentShape) {
       const match = findCompletedShape(board, player, currentShape);
       if (!match) break;
-      totalScore += currentShape.size;
-      match.forEach(([mr, mc]) => { board[mr][mc] = lockedType; locked.add(`${mr},${mc}`); allFlash.add(`${mr},${mc}`); });
+      const flash = new Set();
+      match.forEach(([mr, mc]) => { board[mr][mc] = lockedType; locked.add(`${mr},${mc}`); flash.add(`${mr},${mc}`); });
       popKeyRef.current++;
-      lastSplash = { cells: match, key: popKeyRef.current, isBlack };
-      // Assign a new random shape — it may or may not be feasible, that's fine
-      currentShape = randomShape();
+      const nextShape = randomShape();
+      steps.push({
+        pts: currentShape.size, match, flash, isBlack,
+        splashKey: popKeyRef.current, newShape: nextShape,
+        boardSnap: board.map(r => [...r]),
+        lockedSnap: new Set(locked),
+      });
+      currentShape = nextShape;
     }
-    return { score: totalScore, shape: currentShape, flash: allFlash, splashCells: lastSplash };
+    return steps;
+  }, []);
+
+  // Apply visuals for one completion step (flash, splash, score pop, sound)
+  const showCompletion = useCallback((step, r, c, playerStr) => {
+    setBoard(step.boardSnap);
+    setLockedCells(step.lockedSnap);
+    setFlashCells(step.flash);
+    popKeyRef.current++;
+    setSplash({ cells: step.match, key: popKeyRef.current, isBlack: step.isBlack });
+    setScorePop({ x: r, y: c, pts: step.pts, key: popKeyRef.current, player: playerStr });
+    setTimeout(() => setScorePop(null), 1200);
+    setTimeout(() => setSplash(null), 1000);
+    snd(Sounds.shapeComplete);
+  }, [snd]);
+
+  // End-of-turn: check win/board-full/both-blocked, then pass turn.
+  const endTurn = useCallback((player, boardState, pScore, aScore, pShape, aShape) => {
+    const isPlayer = player === BLACK;
+    const activeScore = isPlayer ? pScore : aScore;
+    if (activeScore >= WIN_SCORE) {
+      snd(isPlayer ? Sounds.win : Sounds.lose);
+      setEndReason("score"); setGameOver(isPlayer ? "player" : "ai");
+      if (!isPlayer) setAiThinking(false);
+      return;
+    }
+    const hasEmpty = boardState.some(row => row.some(cell => cell === EMPTY));
+    if (!hasEmpty) {
+      const w = pScore > aScore ? "player" : aScore > pScore ? "ai" : "draw";
+      snd(w === "player" ? Sounds.win : Sounds.lose);
+      setEndReason("board_full"); setGameOver(w);
+      if (!isPlayer) setAiThinking(false);
+      return;
+    }
+    const pBlocked = !canShapeFit(boardState, BLACK, pShape);
+    const aBlocked = !canShapeFit(boardState, WHITE, aShape);
+    if (pBlocked && aBlocked) {
+      const w = pScore > aScore ? "player" : aScore > pScore ? "ai" : "draw";
+      snd(w === "player" ? Sounds.win : Sounds.lose);
+      setEndReason("both_blocked"); setGameOver(w);
+      if (!isPlayer) setAiThinking(false);
+      return;
+    }
+    if (isPlayer) { setTurn(WHITE); setAiThinking(true); }
+    else { setTurn(BLACK); setAiThinking(false); }
+  }, [snd]);
+
+  // Chain animation queue — plays subsequent chain completions with delays
+  const [chainQueue, setChainQueue] = useState(null);
+
+  useEffect(() => {
+    if (!chainQueue) return;
+    const { player, steps, step, r, c } = chainQueue;
+    const timeout = setTimeout(() => {
+      setFlashCells(new Set());
+      if (step >= steps.length) {
+        // All chain steps done — finalize turn
+        setChainQueue(null);
+        const { fPS, fAS, fPSh, fASh, fBoard } = chainQueue;
+        endTurn(player, fBoard, fPS, fAS, fPSh, fASh);
+        return;
+      }
+      // Apply next chain step
+      const s = steps[step];
+      const isBlack = player === BLACK;
+      showCompletion(s, r, c, isBlack ? "black" : "white");
+      if (isBlack) { setPlayerScore(prev => prev + s.pts); setPlayerShape(s.newShape); }
+      else { setAiScore(prev => prev + s.pts); setAiShape(s.newShape); }
+      setChainQueue(prev => ({ ...prev, step: step + 1 }));
+    }, 800);
+    return () => clearTimeout(timeout);
+  }, [chainQueue, showCompletion, endTurn]);
+
+  // Start a chain queue after applying the first step (shared by player + AI).
+  // pScore/aScore should already include step 0's points.
+  const startChain = useCallback((player, steps, r, c, pScore, aScore, pShape, aShape) => {
+    const remainingScore = steps.slice(1).reduce((sum, s) => sum + s.pts, 0);
+    const last = steps[steps.length - 1];
+    setChainQueue({
+      player, steps, step: 1, r, c,
+      fPS: player === BLACK ? pScore + remainingScore : pScore,
+      fAS: player === WHITE ? aScore + remainingScore : aScore,
+      fPSh: player === BLACK ? last.newShape : pShape,
+      fASh: player === WHITE ? last.newShape : aShape,
+      fBoard: last.boardSnap,
+    });
   }, []);
 
   const handleCellClick = useCallback((r, c) => {
-    if (gameOver || turn !== BLACK || board[r][c] !== EMPTY) return;
+    if (gameOver || turn !== BLACK || board[r][c] !== EMPTY || chainQueue) return;
     snd(Sounds.stonePlace);
     const newBoard = board.map((row) => [...row]);
     newBoard[r][c] = BLACK;
@@ -407,37 +493,35 @@ export default function GobanGame() {
     setMoveCount((m) => m + 1);
 
     const blocked = !canShapeFit(board, BLACK, playerShape);
-    const newLocked = new Set(lockedCells);
-    const result = blocked
-      ? { score: 0, shape: playerShape, flash: new Set(), splashCells: null }
-      : resolveCompletions(newBoard, BLACK, playerShape, newLocked);
-    const newPlayerScore = playerScore + result.score;
-
-    if (result.score > 0) {
-      popKeyRef.current++;
-      setScorePop({ x: r, y: c, pts: result.score, key: popKeyRef.current, player: "black" });
-      setSplash(result.splashCells);
-      setTimeout(() => setScorePop(null), 1200);
-      setTimeout(() => setSplash(null), 1000);
-      snd(Sounds.shapeComplete);
+    if (blocked) {
+      setBoard(newBoard);
+      endTurn(BLACK, newBoard, playerScore, aiScore, playerShape, aiShapeState);
+      return;
     }
-    setBoard(newBoard);
-    setPlayerScore(newPlayerScore);
-    setLockedCells(newLocked);
-    setFlashCells(result.flash);
-    if (result.shape !== playerShape) setPlayerShape(result.shape);
 
-    if (newPlayerScore >= WIN_SCORE) { snd(Sounds.win); setEndReason("score"); setGameOver("player"); return; }
-    if (result.flash.size > 0) setTimeout(() => setFlashCells(new Set()), 700);
-    const hasEmpty = newBoard.some((row) => row.some((cell) => cell === EMPTY));
-    if (!hasEmpty) { const w = newPlayerScore > aiScore ? "player" : aiScore > newPlayerScore ? "ai" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setEndReason("board_full"); setGameOver(w); return; }
-    // Both shapes blocked — no more points possible, end the game
-    const playerNowBlocked = !canShapeFit(newBoard, BLACK, result.shape);
-    const aiNowBlocked = !canShapeFit(newBoard, WHITE, aiShapeState);
-    if (playerNowBlocked && aiNowBlocked) { const w = newPlayerScore > aiScore ? "player" : aiScore > newPlayerScore ? "ai" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setEndReason("both_blocked"); setGameOver(w); return; }
-    setTurn(WHITE);
-    setAiThinking(true);
-  }, [board, turn, gameOver, playerShape, aiShapeState, playerScore, aiScore, lockedCells, resolveCompletions, snd]);
+    const newLocked = new Set(lockedCells);
+    const steps = computeChain(newBoard, BLACK, playerShape, newLocked);
+    if (steps.length === 0) {
+      setBoard(newBoard);
+      endTurn(BLACK, newBoard, playerScore, aiScore, playerShape, aiShapeState);
+      return;
+    }
+
+    // Apply first completion immediately
+    const s0 = steps[0];
+    showCompletion(s0, r, c, "black");
+    setPlayerScore(playerScore + s0.pts);
+    setPlayerShape(s0.newShape);
+
+    if (steps.length > 1) {
+      // Chain! Queue remaining steps — turn finalized when queue drains
+      startChain(BLACK, steps, r, c, playerScore + s0.pts, aiScore, s0.newShape, aiShapeState);
+    } else {
+      // Single completion — finalize turn now
+      setTimeout(() => setFlashCells(new Set()), 700);
+      endTurn(BLACK, s0.boardSnap, playerScore + s0.pts, aiScore, s0.newShape, aiShapeState);
+    }
+  }, [board, turn, gameOver, playerShape, aiShapeState, playerScore, aiScore, lockedCells, chainQueue, computeChain, showCompletion, startChain, endTurn, snd]);
 
   // AI move is split into two phases:
   // Phase 1 (aiPending === null): decide move, place stone, render it
@@ -445,7 +529,7 @@ export default function GobanGame() {
   const [aiPending, setAiPending] = useState(null);
 
   useEffect(() => {
-    if (turn !== WHITE || gameOver || !aiThinking || aiPending) return;
+    if (turn !== WHITE || gameOver || !aiThinking || aiPending || chainQueue) return;
     const timeout = setTimeout(() => {
       const currentAiShape = aiShapeState;
       const blocked = !canShapeFit(board, WHITE, currentAiShape);
@@ -461,7 +545,7 @@ export default function GobanGame() {
       setAiPending({ board: newBoard, r, c, shape: currentAiShape, blocked });
     }, 600);
     return () => clearTimeout(timeout);
-  }, [turn, gameOver, aiThinking, aiPending, board, aiShapeState, playerShape, playerScore, aiScore, snd]);
+  }, [turn, gameOver, aiThinking, aiPending, chainQueue, board, aiShapeState, playerShape, playerScore, aiScore, snd]);
 
   useEffect(() => {
     if (!aiPending) return;
@@ -469,40 +553,39 @@ export default function GobanGame() {
       const { board: newBoard, r, c, shape: currentAiShape, blocked } = aiPending;
       setAiPending(null);
 
-      const newLocked = new Set(lockedCells);
-      const result = blocked
-        ? { score: 0, shape: currentAiShape, flash: new Set(), splashCells: null }
-        : resolveCompletions(newBoard, WHITE, currentAiShape, newLocked);
-      const newAiScore = aiScore + result.score;
-
-      if (result.score > 0) {
-        popKeyRef.current++;
-        setScorePop({ x: r, y: c, pts: result.score, key: popKeyRef.current, player: "white" });
-        setSplash(result.splashCells);
-        setTimeout(() => setScorePop(null), 1200);
-        setTimeout(() => setSplash(null), 1000);
-        snd(Sounds.shapeComplete);
+      if (blocked) {
+        endTurn(WHITE, newBoard, playerScore, aiScore, playerShape, currentAiShape);
+        return;
       }
-      setAiScore(newAiScore); setLockedCells(newLocked); setFlashCells(result.flash);
-      if (result.shape !== currentAiShape) setAiShape(result.shape);
-      if (newAiScore >= WIN_SCORE) { snd(Sounds.lose); setEndReason("score"); setGameOver("ai"); setAiThinking(false); return; }
-      if (result.flash.size > 0) setTimeout(() => setFlashCells(new Set()), 700);
-      const hasEmpty = newBoard.some((row) => row.some((cell) => cell === EMPTY));
-      if (!hasEmpty) { const w = newAiScore > playerScore ? "ai" : playerScore > newAiScore ? "player" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setEndReason("board_full"); setGameOver(w); setAiThinking(false); return; }
-      // Both shapes blocked — no more points possible, end the game
-      const aiNowBlocked = !canShapeFit(newBoard, WHITE, result.shape);
-      const playerNowBlocked = !canShapeFit(newBoard, BLACK, playerShape);
-      if (aiNowBlocked && playerNowBlocked) { const w = newAiScore > playerScore ? "ai" : playerScore > newAiScore ? "player" : "draw"; snd(w === "player" ? Sounds.win : Sounds.lose); setEndReason("both_blocked"); setGameOver(w); setAiThinking(false); return; }
-      setTurn(BLACK); setAiThinking(false);
-    }, 300); // delay to let the stone-pop animation finish
+
+      const newLocked = new Set(lockedCells);
+      const steps = computeChain(newBoard, WHITE, currentAiShape, newLocked);
+      if (steps.length === 0) {
+        endTurn(WHITE, newBoard, playerScore, aiScore, playerShape, currentAiShape);
+        return;
+      }
+
+      // Apply first completion
+      const s0 = steps[0];
+      showCompletion(s0, r, c, "white");
+      setAiScore(aiScore + s0.pts);
+      setAiShape(s0.newShape);
+
+      if (steps.length > 1) {
+        startChain(WHITE, steps, r, c, playerScore, aiScore + s0.pts, playerShape, s0.newShape);
+      } else {
+        setTimeout(() => setFlashCells(new Set()), 700);
+        endTurn(WHITE, s0.boardSnap, playerScore, aiScore + s0.pts, playerShape, s0.newShape);
+      }
+    }, 300);
     return () => clearTimeout(timeout);
-  }, [aiPending, aiScore, playerScore, playerShape, lockedCells, resolveCompletions, snd]);
+  }, [aiPending, aiScore, playerScore, playerShape, lockedCells, computeChain, showCompletion, startChain, endTurn, snd]);
 
   const resetGame = () => {
     setBoard(createBoard()); setPlayerShape(randomShape()); setAiShape(randomShape());
     setPlayerScore(0); setAiScore(0); setTurn(BLACK); setGameOver(null);
     setLastPlaced(null); setLockedCells(new Set()); setFlashCells(new Set());
-    setMoveCount(0); setAiThinking(false); setAiPending(null); setScorePop(null); setSplash(null); setHideOverlay(false); setEndReason(null);
+    setMoveCount(0); setAiThinking(false); setAiPending(null); setChainQueue(null); setScorePop(null); setSplash(null); setHideOverlay(false); setEndReason(null);
   };
 
   const { mobile, cellSize } = useLayout();
